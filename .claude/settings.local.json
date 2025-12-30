@@ -12,7 +12,11 @@
       "Bash(./scripts/run-spark-job.sh:*)",
       "Bash(docker ps:*)",
       "Bash(/opt/spark/jobs/kafka_to_deltalake.py)",
-      "Bash(docker run:*)"
+      "Bash(docker run:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker logs:*)",
+      "Bash(python3:*)",
+      "Bash(./scripts/manage-streaming-job.sh:*)"
     ]
   }
 }

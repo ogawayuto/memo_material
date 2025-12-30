@@ -96,29 +96,63 @@ def parse_cdc_events(kafka_df):
     """Parse Debezium CDC events from Kafka"""
     logger.info("Parsing CDC events...")
 
+    # Debezium message structure: {"schema": {...}, "payload": {...}}
+    # First, extract the payload field from the JSON
+    debezium_schema = StructType([
+        StructField("payload", cdc_value_schema, True)
+    ])
+
     # Parse JSON value from Kafka message
     parsed_df = kafka_df.select(
         col("key").cast("string").alias("kafka_key"),
-        from_json(col("value").cast("string"), cdc_value_schema).alias("data"),
+        from_json(col("value").cast("string"), debezium_schema).alias("envelope"),
         col("timestamp").alias("kafka_timestamp")
     )
 
-    # Extract relevant fields
-    # For inserts and updates, use 'after' payload
-    # For deletes, use 'before' payload
+    # Extract relevant fields from payload
+    # For inserts (c) and updates (u), use 'after' payload
+    # For deletes (d), use 'before' payload to get the ID
+    from pyspark.sql.functions import when, coalesce
+
     transformed_df = parsed_df.select(
-        col("data.after.id").alias("id"),
-        col("data.after.name").alias("name"),
-        col("data.after.email").alias("email"),
-        (col("data.after.created_at") / 1000).cast("timestamp").alias("created_at"),
-        (col("data.after.updated_at") / 1000).cast("timestamp").alias("updated_at"),
-        col("data.op").alias("operation"),
-        (col("data.ts_ms") / 1000).cast("timestamp").alias("cdc_timestamp"),
+        # For DELETE, get id from before; otherwise from after
+        coalesce(
+            col("envelope.payload.after.id"),
+            col("envelope.payload.before.id")
+        ).alias("id"),
+        col("envelope.payload.after.name").alias("name"),
+        col("envelope.payload.after.email").alias("email"),
+        (col("envelope.payload.after.created_at") / 1000000).cast("timestamp").alias("created_at"),
+        (col("envelope.payload.after.updated_at") / 1000000).cast("timestamp").alias("updated_at"),
+        col("envelope.payload.op").alias("operation"),
+        (col("envelope.payload.ts_ms") / 1000).cast("timestamp").alias("cdc_timestamp"),
         col("kafka_timestamp")
-    ).filter(col("data.after").isNotNull())  # Filter out delete events for now
+    )
 
     logger.info("CDC events parsed successfully")
     return transformed_df
+
+
+def process_batch(batch_df, batch_id):
+    """Process each micro-batch with logging"""
+    count = batch_df.count()
+    logger.info(f"=== Batch {batch_id}: Processing {count} records ===")
+
+    if count > 0:
+        # Show sample data
+        logger.info("Sample data:")
+        batch_df.show(5, truncate=False)
+
+        # Write to Delta Lake
+        batch_df.write \
+            .format("delta") \
+            .mode("append") \
+            .option("mergeSchema", "true") \
+            .save(DELTA_TABLE_PATH)
+
+        logger.info(f"=== Batch {batch_id}: Successfully wrote {count} records to Delta Lake ===")
+    else:
+        logger.info(f"=== Batch {batch_id}: No new data ===")
 
 
 def write_to_delta_lake(streaming_df):
@@ -126,15 +160,15 @@ def write_to_delta_lake(streaming_df):
     logger.info(f"Writing to Delta Lake: {DELTA_TABLE_PATH}")
 
     query = streaming_df.writeStream \
-        .format("delta") \
-        .outputMode("append") \
+        .foreachBatch(process_batch) \
         .option("checkpointLocation", CHECKPOINT_LOCATION) \
-        .option("mergeSchema", "true") \
-        .start(DELTA_TABLE_PATH)
+        .trigger(processingTime='5 seconds') \
+        .start()
 
     logger.info("Streaming query started successfully")
     logger.info(f"Checkpoint location: {CHECKPOINT_LOCATION}")
     logger.info(f"Delta table location: {DELTA_TABLE_PATH}")
+    logger.info("Trigger: Every 5 seconds")
 
     return query
 
