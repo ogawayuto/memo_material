@@ -1,0 +1,5 @@
+# Python dependencies for Spark jobs
+# These packages are used in Spark streaming jobs
+
+# Spark and Delta Lake are loaded via --packages in spark-submit
+# No additional Python packages required for the basic streaming job

@@ -1,0 +1,16 @@
+# Python dependencies for JupyterLab notebooks
+# Install these packages in JupyterLab container
+
+# Delta Lake for Python
+delta-spark==4.0.0
+
+# AWS SDK for S3 connectivity
+boto3
+
+# Data visualization
+matplotlib
+seaborn
+
+# Data manipulation
+pandas
+numpy
