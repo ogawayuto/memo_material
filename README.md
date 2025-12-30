@@ -2,18 +2,16 @@
 
 開発/検証用のDockerベースCDCパイプライン環境です。PostgreSQLからDebeziumでCDC（Change Data Capture）を行い、Kafkaにストリーミングします。
 
-**⚠️ 注意**: Spark → Delta Lake統合は現在保留中です。詳細は `SPARK_INTEGRATION_HANDOVER.md` を参照してください。
+PostgreSQLからDebezium→Kafka→Spark→Delta Lakeへの完全なデータパイプラインが構築されています。
 
 ## アーキテクチャ
 
 ```
-[PostgreSQL] → [Debezium CDC] → [Kafka] → (Spark統合は保留中)
-     ↓              ↓               ↓
- [Adminer]    [Kafka Connect]  [Kafka UI]
-
-[MinIO] (S3互換ストレージ - 準備済み)
-   ↓
-[JupyterLab] (データ分析環境)
+[PostgreSQL] → [Debezium CDC] → [Kafka] → [Spark Streaming] → [Delta Lake]
+     ↓              ↓               ↓             ↓                   ↓
+ [Adminer]    [Kafka Connect]  [Kafka UI]   [Spark UI]            [MinIO]
+                                                                      ↓
+                                                              [JupyterLab]
 ```
 
 ## コンポーネント（最新バージョン - 2025年12月）
@@ -26,9 +24,9 @@
 | Kafka UI | latest | 8082 | Kafka管理UI | ✅ 動作中 |
 | Debezium | 3.4 (quay.io) | 8083 | CDC実行環境 | ✅ 動作中 |
 | MinIO | latest | 9000, 9001 | S3互換ストレージ | ✅ 動作中 |
-| JupyterLab | latest | 8888 | データ分析環境 | ✅ 動作中 |
-| Apache Spark | - | - | 処理エンジン | ⏸️ 保留中 |
-| Delta Lake | - | - | データレイク | ⏸️ 保留中 |
+| Apache Spark | 4.0.1 | 7077, 8080 | ストリーミング処理 | ✅ 動作中 |
+| Delta Lake | 4.0.0 | - | ACIDデータレイク | ✅ 動作中 |
+| JupyterLab | Spark 4.0.1 | 8888 | データ分析環境 | ✅ 動作中 |
 
 ## 必要要件
 
@@ -73,6 +71,8 @@ cd /path/to/memo_material
 | Adminer (PostgreSQL UI) | http://localhost:8081 | User: postgres / Pass: postgres / DB: sourcedb |
 | Kafka UI | http://localhost:8082 | - |
 | Kafka Connect API | http://localhost:8083 | - |
+| Spark Master UI | http://localhost:8080 | - |
+| Spark Worker UI | http://localhost:8091 | - |
 | MinIO Console | http://localhost:9001 | User: minioadmin / Pass: minioadmin |
 | JupyterLab | http://localhost:8888 | Token: delta-lake-token |
 
@@ -94,15 +94,37 @@ Kafka UI（http://localhost:8082）で以下を確認：
 1. Topics → `cdc.public.customers` を選択
 2. Messages タブでCDCイベントを表示
 
-### JupyterLabでデータ分析
+### Sparkストリーミングジョブの管理
+
+**重要**: ストリーミングジョブは同時に1つしか実行できません。
+
+```bash
+# ジョブステータス確認
+./scripts/manage-streaming-job.sh status
+
+# ジョブ開始
+./scripts/manage-streaming-job.sh start
+
+# ジョブ停止
+./scripts/manage-streaming-job.sh stop
+
+# ジョブ再起動（停止→チェックポイントクリーンアップ→開始）
+./scripts/manage-streaming-job.sh restart
+
+# チェックポイントのみクリーンアップ
+./scripts/manage-streaming-job.sh clean
+```
+
+Spark Master UI（http://localhost:8080）でジョブの実行状況を確認できます。
+
+### JupyterLabでDelta Lakeクエリ
 
 1. JupyterLab（http://localhost:8888）にアクセス
 2. トークン: `delta-lake-token` でログイン
-3. Pythonノートブックを作成してデータ分析を実行
+3. `delta_viewer.ipynb` を開く
+4. Sparkセッションを起動してDelta Lakeテーブルをクエリ
 
-**注意**: Spark → Delta Lake統合は保留中です。詳細は `SPARK_INTEGRATION_HANDOVER.md` を参照してください。
-
-## データフロー（現在動作中）
+## データフロー
 
 ```
 1. PostgreSQL: customersテーブルにINSERT/UPDATE/DELETE
@@ -111,7 +133,11 @@ Kafka UI（http://localhost:8082）で以下を確認：
    ↓
 3. Kafka: トピック cdc.public.customers にパブリッシュ ✅
    ↓
-4. (Spark → Delta Lake統合は保留中)
+4. Spark Streaming: Kafkaトピックからリアルタイム処理 ✅
+   ↓
+5. Delta Lake: MinIOにACIDトランザクション保存 ✅
+   ↓
+6. JupyterLab: Delta Lakeテーブルをクエリ・分析 ✅
 ```
 
 ## プロジェクト構造
@@ -144,7 +170,9 @@ memo_material/
     ├── setup.sh
     ├── start.sh
     ├── stop.sh
-    └── health-check.sh
+    ├── health-check.sh
+    ├── run-spark-job.sh
+    └── manage-streaming-job.sh  # ストリーミングジョブ管理
 ```
 
 ## トラブルシューティング
@@ -169,6 +197,25 @@ curl http://localhost:8083/connectors/postgres-source-connector/status
 ./debezium/scripts/register-connector.sh
 ```
 
+### Sparkストリーミングジョブの競合エラー
+
+エラー: `Multiple streaming queries are concurrently using s3a://delta-lake/checkpoints/customers/offsets`
+
+**原因**: 複数のストリーミングジョブが同時に実行されています
+
+**解決方法**:
+```bash
+# 管理スクリプトでジョブを再起動
+./scripts/manage-streaming-job.sh restart
+
+# または手動で実行
+docker exec spark-master pkill -9 -f "kafka_to_deltalake"
+docker run --rm --network el-pipeline-network \
+  -e MC_HOST_minio=http://minioadmin:minioadmin@minio:9000 \
+  minio/mc rm --recursive --force minio/delta-lake/checkpoints/
+./scripts/run-spark-job.sh
+```
+
 ### Sparkジョブが失敗する
 
 ```bash
@@ -177,7 +224,7 @@ curl http://localhost:8083/connectors/postgres-source-connector/status
 
 # ログ確認
 docker logs spark-master
-docker logs spark-worker-1
+docker logs spark-worker
 ```
 
 ### Delta Lakeが読めない
@@ -241,9 +288,9 @@ docker-compose down -v
 | PostgreSQL | 18.1 | 2025-11-13 |
 | Apache Kafka | 4.1.1 | 2025-11-12 |
 | Debezium | 3.4 (quay.io) | 2025-12-16 |
-| Apache Spark | 4.1.0 | 2025-12-16 |
+| Apache Spark | 4.0.1 | 2024-12-19 |
 | Delta Lake | 4.0.0 | 2025-06-06 |
-| Hadoop AWS | 3.4.2 | 2025-08-20 |
+| Hadoop AWS | 3.4.1 | 2024-12-19 |
 
 ## ライセンス
 
@@ -260,6 +307,6 @@ docker-compose down -v
 
 ## Spark統合について
 
-Spark → Delta Lake統合は現在保留中です。互換性問題の詳細、トラブルシューティング履歴、推奨アプローチについては以下を参照してください：
+Spark 4.0.1 + Delta Lake 4.0.0の統合が完了しました。互換性問題の解決履歴とトラブルシューティング情報については以下を参照してください：
 
-📄 **[SPARK_INTEGRATION_HANDOVER.md](SPARK_INTEGRATION_HANDOVER.md)** - Spark統合の引継ぎ資料
+📄 **[SPARK_INTEGRATION_HANDOVER.md](SPARK_INTEGRATION_HANDOVER.md)** - Spark統合の実装履歴と技術詳細

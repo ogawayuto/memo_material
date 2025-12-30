@@ -43,7 +43,16 @@ echo "Waiting 20 seconds for Kafka Connect to be ready..."
 sleep 20
 echo ""
 
-echo "Step 5: Registering Debezium connector..."
+echo "Step 5: Starting Spark cluster..."
+docker-compose up -d spark-master spark-worker
+echo "   ✓ Spark cluster started"
+echo ""
+
+echo "Waiting 15 seconds for Spark cluster to be ready..."
+sleep 15
+echo ""
+
+echo "Step 6: Registering Debezium connector..."
 if [ -f "debezium/scripts/register-connector.sh" ]; then
     ./debezium/scripts/register-connector.sh
 else
@@ -56,7 +65,7 @@ fi
 echo "   ✓ Debezium connector registered"
 echo ""
 
-echo "Step 6: Starting JupyterLab..."
+echo "Step 7: Starting JupyterLab..."
 docker-compose up -d jupyter
 echo "   ✓ JupyterLab started"
 echo ""
@@ -69,10 +78,16 @@ echo "Service URLs:"
 echo "  - Adminer (PostgreSQL):  http://localhost:8081"
 echo "  - Kafka UI:              http://localhost:8082"
 echo "  - Kafka Connect API:     http://localhost:8083"
+echo "  - Spark Master UI:       http://localhost:8080"
+echo "  - Spark Worker UI:       http://localhost:8091"
 echo "  - MinIO Console:         http://localhost:9001"
 echo "  - JupyterLab:            http://localhost:8888 (token: delta-lake-token)"
 echo ""
-echo "Note: Spark integration is pending. See SPARK_INTEGRATION_HANDOVER.md"
+echo "Spark Streaming Job Management:"
+echo "  - Start job:    ./scripts/manage-streaming-job.sh start"
+echo "  - Stop job:     ./scripts/manage-streaming-job.sh stop"
+echo "  - Restart job:  ./scripts/manage-streaming-job.sh restart"
+echo "  - Check status: ./scripts/manage-streaming-job.sh status"
 echo ""
 echo "Check service status:"
 echo "  ./scripts/health-check.sh"

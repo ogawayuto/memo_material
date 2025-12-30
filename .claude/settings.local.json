@@ -5,7 +5,14 @@
       "WebFetch(domain:pypi.org)",
       "Bash(docker pull:*)",
       "Bash(./scripts/start.sh:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(cat:*)",
+      "Bash(xargs -I {} sh -c 'echo \"\"=== {} ===\"\" && head -30 {}')",
+      "WebFetch(domain:medium.com)",
+      "Bash(./scripts/run-spark-job.sh:*)",
+      "Bash(docker ps:*)",
+      "Bash(/opt/spark/jobs/kafka_to_deltalake.py)",
+      "Bash(docker run:*)"
     ]
   }
 }

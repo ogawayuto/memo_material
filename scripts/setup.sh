@@ -42,7 +42,7 @@ echo "   ✓ docker-compose.yml is valid"
 echo ""
 
 echo "5. Creating necessary directories..."
-mkdir -p postgres debezium/connectors debezium/scripts spark/conf spark/jobs minio notebooks scripts
+mkdir -p postgres debezium/connectors debezium/scripts spark/conf spark/jobs minio notebooks scripts jupyter
 echo "   ✓ Directories created"
 echo ""
 
@@ -57,7 +57,12 @@ echo "  3. Wait for all services to be ready"
 echo "  4. Access the UIs:"
 echo "     - Adminer (PostgreSQL):  http://localhost:8081"
 echo "     - Kafka UI:              http://localhost:8082"
-echo "     - MinIO Console:         http://localhost:9001"
 echo "     - Spark Master UI:       http://localhost:8080"
+echo "     - Spark Worker UI:       http://localhost:8091"
+echo "     - MinIO Console:         http://localhost:9001"
 echo "     - JupyterLab:            http://localhost:8888"
+echo "  5. Manage Spark streaming jobs:"
+echo "     - ./scripts/manage-streaming-job.sh start"
+echo "     - ./scripts/manage-streaming-job.sh stop"
+echo "     - ./scripts/manage-streaming-job.sh status"
 echo ""

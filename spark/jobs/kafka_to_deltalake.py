@@ -56,7 +56,7 @@ cdc_value_schema = StructType([
 
 def create_spark_session():
     """Create and configure Spark session for Delta Lake"""
-    logger.info("Creating Spark session...")
+    logger.info("Creating Spark session with Delta Lake...")
 
     spark = SparkSession.builder \
         .appName("KafkaToDeltaLake") \
@@ -72,7 +72,7 @@ def create_spark_session():
 
     # Set log level
     spark.sparkContext.setLogLevel("WARN")
-    logger.info("Spark session created successfully")
+    logger.info("Spark session created successfully with Delta Lake support")
     return spark
 
 
