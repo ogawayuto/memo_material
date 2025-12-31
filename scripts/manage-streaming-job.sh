@@ -44,20 +44,33 @@ start_job() {
     fi
 
     echo "Submitting job to Spark cluster..."
-    docker exec -d spark-master /opt/spark/bin/spark-submit \
+    docker exec -d -e HOME=/opt/spark spark-master /opt/spark/bin/spark-submit \
         --master spark://spark-master:7077 \
-        --packages io.delta:delta-spark_2.12:3.2.1,org.apache.spark:spark-sql-kafka-0-10_2.12:4.0.1,org.apache.hadoop:hadoop-aws:3.4.1 \
+        --packages io.delta:delta-spark_2.13:4.0.0,org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1,org.apache.hadoop:hadoop-aws:3.4.1 \
         --conf "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" \
         --conf "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog" \
+        --conf "spark.jars.ivy=/tmp/.ivy2" \
         /opt/spark/jobs/kafka_to_deltalake.py
 
-    sleep 5
+    echo ""
+    echo "Waiting for job to start..."
+    sleep 3
 
     if is_job_running; then
         echo "✓ Job started successfully"
-        echo "View logs: docker logs spark-master"
+        echo ""
+        echo "============================================"
+        echo "  Showing startup logs (Ctrl+C to exit)"
+        echo "============================================"
+        echo ""
+
+        # Follow logs and show important startup events
+        docker logs spark-master -f --tail 50 2>&1 | grep --line-buffered -E "(Starting|Spark|Kafka|Schema Registry|Avro|Batch|Processing|ERROR|WARN|Delta)"
     else
         echo "❌ Failed to start job"
+        echo ""
+        echo "Recent logs:"
+        docker logs spark-master --tail 30 2>&1
         return 1
     fi
 }
@@ -73,15 +86,93 @@ restart_job() {
 
 # Function to show job status
 status_job() {
-    echo "Checking job status..."
+    echo "============================================"
+    echo "  Spark Streaming Job Status"
+    echo "============================================"
+    echo ""
+
+    # Check if job is running
     if is_job_running; then
-        echo "✓ Job is RUNNING"
+        echo "Status: ✓ RUNNING"
         echo ""
-        echo "Processes:"
-        docker exec spark-master ps aux | grep -E "(kafka_to_deltalake)" | grep -v grep
+
+        # Show process details
+        echo "Process Details:"
+        docker exec spark-master ps aux | grep -E "(kafka_to_deltalake)" | grep -v grep | head -5
+        echo ""
+
+        # Check recent logs for activity
+        echo "Recent Activity (last 10 lines):"
+        docker logs spark-master --tail 10 2>&1 | grep -E "(Batch|Processing|records|ERROR|Avro)" || echo "  (No recent activity found)"
+        echo ""
+
+        # Count error logs
+        ERROR_COUNT=$(docker logs spark-master 2>&1 | grep -c "ERROR" || echo "0")
+        if [ "$ERROR_COUNT" -gt 0 ]; then
+            echo "⚠ Errors detected: $ERROR_COUNT error messages in logs"
+            echo "  View errors: docker logs spark-master 2>&1 | grep ERROR"
+        else
+            echo "✓ No errors detected in logs"
+        fi
+        echo ""
+
+        # Check Schema Registry connectivity
+        echo "Schema Registry Status:"
+        if curl -s http://localhost:8085/subjects > /dev/null 2>&1; then
+            SUBJECT_COUNT=$(curl -s http://localhost:8085/subjects | jq '. | length' 2>/dev/null || echo "?")
+            echo "  ✓ Connected (Subjects: $SUBJECT_COUNT)"
+        else
+            echo "  ✗ Not accessible"
+        fi
+        echo ""
+
+        # Show Spark UI URL
+        echo "Monitoring:"
+        echo "  Spark Master UI: http://localhost:8080"
+        echo "  Spark Driver UI: http://localhost:4040 (when job is running)"
+        echo "  View logs: docker logs spark-master -f"
+
     else
-        echo "○ Job is NOT running"
+        echo "Status: ○ NOT RUNNING"
+        echo ""
+        echo "Start the job with: $0 start"
+
+        # Check if there are recent error logs
+        if docker logs spark-master --tail 50 2>&1 | grep -q "ERROR"; then
+            echo ""
+            echo "⚠ Recent errors detected in logs:"
+            docker logs spark-master --tail 20 2>&1 | grep "ERROR" | tail -5
+        fi
     fi
+
+    echo ""
+    echo "============================================"
+}
+
+# Function to monitor job in real-time
+monitor_job() {
+    echo "============================================"
+    echo "  Real-time Job Monitor"
+    echo "============================================"
+    echo "Press Ctrl+C to exit"
+    echo ""
+
+    if ! is_job_running; then
+        echo "○ Job is NOT running"
+        echo "Start the job with: $0 start"
+        exit 1
+    fi
+
+    # Follow logs with filtering for important events
+    docker logs spark-master -f 2>&1 | grep --line-buffered -E "(Batch|Processing|records|ERROR|WARN|Avro|Deserialization|Delta)"
+}
+
+# Function to show detailed logs
+logs_job() {
+    LINES="${2:-50}"
+    echo "Showing last $LINES lines of logs..."
+    echo "============================================"
+    docker logs spark-master --tail "$LINES" 2>&1
 }
 
 # Main script logic
@@ -101,15 +192,28 @@ case "${1:-}" in
     status)
         status_job
         ;;
+    monitor)
+        monitor_job
+        ;;
+    logs)
+        logs_job "$@"
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart|clean|status}"
+        echo "Usage: $0 {start|stop|restart|clean|status|monitor|logs}"
         echo ""
         echo "Commands:"
         echo "  start   - Start the streaming job (fails if already running)"
         echo "  stop    - Stop the running job"
         echo "  restart - Stop job, clean checkpoint, and start again"
         echo "  clean   - Clean checkpoint directory only"
-        echo "  status  - Check if job is running"
+        echo "  status  - Check detailed job status with error detection"
+        echo "  monitor - Real-time log monitoring (Ctrl+C to exit)"
+        echo "  logs    - Show recent logs (default: 50 lines, e.g., 'logs 100')"
+        echo ""
+        echo "Examples:"
+        echo "  $0 status          # Check if job is running"
+        echo "  $0 monitor         # Watch logs in real-time"
+        echo "  $0 logs 100        # Show last 100 log lines"
         exit 1
         ;;
 esac
