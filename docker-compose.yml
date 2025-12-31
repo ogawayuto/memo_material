@@ -66,6 +66,43 @@ services:
       retries: 10
       start_period: 30s
 
+  # Confluent Schema Registry
+  schema-registry:
+    image: confluentinc/cp-schema-registry:${SCHEMA_REGISTRY_VERSION}
+    container_name: schema-registry
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+      SCHEMA_REGISTRY_DEBUG: 'true'
+    ports:
+      - "8085:8081"
+    networks:
+      - el-pipeline-network
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Schema Registry UI
+  schema-registry-ui:
+    image: landoop/schema-registry-ui:latest
+    container_name: schema-registry-ui
+    environment:
+      SCHEMAREGISTRY_URL: http://schema-registry:8081
+      PROXY: 'true'
+    ports:
+      - "8086:8000"
+    networks:
+      - el-pipeline-network
+    depends_on:
+      - schema-registry
+
   # Kafka UI
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -73,6 +110,7 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: kafka-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
       DYNAMIC_CONFIG_ENABLED: 'true'
     ports:
       - "8082:8080"
@@ -80,10 +118,14 @@ services:
       - el-pipeline-network
     depends_on:
       - kafka
+      - schema-registry
 
   # Kafka Connect with Debezium
   kafka-connect:
-    image: quay.io/debezium/connect:${DEBEZIUM_VERSION}
+    build:
+      context: ./kafka-connect
+      dockerfile: Dockerfile
+    image: kafka-connect-avro:latest
     container_name: kafka-connect
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
@@ -94,6 +136,8 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_PARTITIONS: 25
+      CONNECT_STATUS_STORAGE_PARTITIONS: 5
     ports:
       - "8083:8083"
     networks:
@@ -102,6 +146,8 @@ services:
       kafka:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      schema-registry:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8083/ || exit 1"]

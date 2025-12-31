@@ -16,7 +16,14 @@
       "Bash(docker exec:*)",
       "Bash(docker logs:*)",
       "Bash(python3:*)",
-      "Bash(./scripts/manage-streaming-job.sh:*)"
+      "Bash(./scripts/manage-streaming-job.sh:*)",
+      "Bash(docker-compose up:*)",
+      "Bash(./scripts/cleanup-for-avro.sh:*)",
+      "Bash(chmod:*)",
+      "Bash(./scripts/cleanup-kafka-offsets.sh:*)",
+      "Bash(docker-compose restart:*)",
+      "Bash(xargs:*)",
+      "Bash(ls:*)"
     ]
   }
 }

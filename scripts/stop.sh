@@ -1,5 +1,6 @@
 #!/bin/bash
 # Stop script for EL Pipeline Environment
+# This script is idempotent and completely destroys all state
 
 set -e
 
@@ -15,25 +16,25 @@ if [ ! -f "docker-compose.yml" ]; then
 fi
 
 echo "Step 1: Stopping Spark streaming jobs..."
-if [ -f "scripts/manage-streaming-job.sh" ]; then
-    ./scripts/manage-streaming-job.sh stop || true
-else
-    docker exec spark-master pkill -9 -f "kafka_to_deltalake" 2>/dev/null || true
-fi
+./scripts/manage-streaming-job.sh stop 2>/dev/null || true
 echo "   ✓ Spark jobs stopped"
 echo ""
 
-echo "Step 2: Stopping all services..."
-docker-compose down
-
+echo "Step 2: Stopping all services and removing volumes..."
+docker-compose down -v
+echo "   ✓ All services stopped and volumes removed"
 echo ""
+
+echo "Step 3: Removing orphaned containers and networks..."
+docker-compose down --remove-orphans 2>/dev/null || true
+echo "   ✓ Cleanup complete"
+echo ""
+
 echo "========================================="
 echo "EL Pipeline Environment Stopped!"
 echo "========================================="
 echo ""
-echo "To remove all data volumes, run:"
-echo "  docker-compose down -v"
-echo ""
+echo "All data has been destroyed."
 echo "To restart the environment, run:"
 echo "  ./scripts/start.sh"
 echo ""

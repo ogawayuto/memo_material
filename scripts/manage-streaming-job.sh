@@ -3,9 +3,6 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-
 # Function to check if job is running
 is_job_running() {
     docker exec spark-master ps aux | grep -E "(kafka_to_deltalake)" | grep -v grep > /dev/null 2>&1
@@ -46,8 +43,23 @@ start_job() {
         return 1
     fi
 
-    cd "$PROJECT_DIR"
-    ./scripts/run-spark-job.sh
+    echo "Submitting job to Spark cluster..."
+    docker exec -d spark-master /opt/spark/bin/spark-submit \
+        --master spark://spark-master:7077 \
+        --packages io.delta:delta-spark_2.12:3.2.1,org.apache.spark:spark-sql-kafka-0-10_2.12:4.0.1,org.apache.hadoop:hadoop-aws:3.4.1 \
+        --conf "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" \
+        --conf "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog" \
+        /opt/spark/jobs/kafka_to_deltalake.py
+
+    sleep 5
+
+    if is_job_running; then
+        echo "✓ Job started successfully"
+        echo "View logs: docker logs spark-master"
+    else
+        echo "❌ Failed to start job"
+        return 1
+    fi
 }
 
 # Function to restart the job
