@@ -10,3 +10,4 @@ requests==2.32.5
 
 # Data processing
 pandas==2.3.3
+pyarrow>=14.0.0  # Required for pandas_udf in PySpark
