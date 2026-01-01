@@ -5,6 +5,9 @@ AVROとConfluent Wireフォーマットの違いに注意が必要。
 FAQ:
 - 既存のテーブルにDebeziumを接続するとどうなる?
     - 既存のレコードのr(初回転送)のメッセージがTopicに流れる
+    - Truncateなどもサポートできるがconnectorの設定が必要
+- StructuredStreamingでの処理はどうする?
+    - 各レコードで各opに対する処理を実装する必要がある
 - deleteの実装
 - truncateも確認
 - scd2の実装
