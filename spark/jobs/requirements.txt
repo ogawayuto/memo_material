@@ -2,4 +2,11 @@
 # These packages are used in Spark streaming jobs
 
 # Spark and Delta Lake are loaded via --packages in spark-submit
-# No additional Python packages required for the basic streaming job
+
+# Confluent Kafka and Avro support for Schema Registry integration
+confluent-kafka[avro]==2.12.2
+fastavro==1.12.1
+requests==2.32.5
+
+# Data processing
+pandas==2.3.3

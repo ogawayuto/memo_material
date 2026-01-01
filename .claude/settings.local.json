@@ -23,7 +23,9 @@
       "Bash(./scripts/cleanup-kafka-offsets.sh:*)",
       "Bash(docker-compose restart:*)",
       "Bash(xargs:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(docker-compose build:*)",
+      "WebSearch"
     ]
   }
 }

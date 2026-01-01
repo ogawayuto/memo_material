@@ -211,7 +211,10 @@ services:
 
   # Spark Master
   spark-master:
-    image: apache/spark:${SPARK_VERSION}-python3
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    image: spark-python-deps:4.0.1
     container_name: spark-master
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     ports:
@@ -231,7 +234,10 @@ services:
 
   # Spark Worker
   spark-worker:
-    image: apache/spark:${SPARK_VERSION}-python3
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    image: spark-python-deps:4.0.1
     container_name: spark-worker
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://${SPARK_MASTER_HOST}:${SPARK_MASTER_PORT}
     environment:
