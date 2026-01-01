@@ -14,6 +14,8 @@ import pandas as pd
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer
 from confluent_kafka.serialization import SerializationContext, MessageField
+from delta.tables import DeltaTable
+from pyspark.sql.window import Window
 
 # Configure logging
 logging.basicConfig(
@@ -59,6 +61,237 @@ def get_avro_deserializer():
             schema_str=None  # Auto-fetch schema from registry based on Schema ID
         )
     return _deserializer
+
+
+# ===== SCD Type 2 Helper Functions =====
+
+def initialize_delta_table(spark, first_batch_df):
+    """
+    Initialize Delta Lake table on first write
+
+    Args:
+        spark: SparkSession
+        first_batch_df: First batch DataFrame with SCD Type 2 schema
+    """
+    first_batch_df.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .option("overwriteSchema", "true") \
+        .save(DELTA_TABLE_PATH)
+
+    logger.info(f"Initialized Delta table at {DELTA_TABLE_PATH}")
+
+
+def prepare_staging_data(cdc_df):
+    """
+    Transform CDC DataFrame into SCD Type 2 format
+
+    Args:
+        cdc_df: DataFrame with CDC fields (id, name, email, etc., operation, timestamps)
+
+    Returns:
+        DataFrame with SCD Type 2 columns added
+    """
+    from pyspark.sql.functions import (
+        col, lit, current_timestamp, row_number
+    )
+
+    # Add row number to handle duplicates in same batch (keep latest by cdc_timestamp)
+    window_spec = Window.partitionBy("id", "operation").orderBy(col("cdc_timestamp").desc())
+
+    staged = cdc_df.select(
+        # Business columns
+        col("id"),
+        col("name"),
+        col("email"),
+        col("created_at"),
+        col("updated_at"),
+
+        # SCD Type 2 metadata
+        col("cdc_timestamp").alias("valid_from"),
+        lit(None).cast("timestamp").alias("valid_to"),
+        lit(True).alias("is_current"),
+
+        # Audit columns
+        col("cdc_timestamp"),
+        col("kafka_timestamp"),
+        current_timestamp().alias("processed_at"),
+
+        # Keep operation temporarily for processing logic
+        col("operation"),
+
+        # Add row number for deduplication
+        row_number().over(window_spec).alias("rn")
+    ).filter(col("rn") == 1).drop("rn")  # Keep only first occurrence (latest by timestamp)
+
+    return staged
+
+
+def handle_truncate(spark, truncate_df):
+    """
+    Handle TRUNCATE operation - close all active records
+
+    Args:
+        spark: SparkSession
+        truncate_df: DataFrame containing TRUNCATE events
+    """
+    from pyspark.sql.functions import lit
+
+    # Get the timestamp from the truncate event
+    truncate_time = truncate_df.select("cdc_timestamp").first()[0]
+
+    # Check if Delta table exists
+    if DeltaTable.isDeltaTable(spark, DELTA_TABLE_PATH):
+        delta_table = DeltaTable.forPath(spark, DELTA_TABLE_PATH)
+
+        # Update all current records to closed
+        delta_table.update(
+            condition = "is_current = true",
+            set = {
+                "valid_to": lit(truncate_time),
+                "is_current": lit(False)
+            }
+        )
+        logger.info(f"TRUNCATE: Closed all active records at {truncate_time}")
+    else:
+        logger.warning("TRUNCATE: Delta table does not exist yet")
+
+
+def process_updates(spark, delta_table, updates_df):
+    """
+    Handle UPDATE: Close old version, insert new version
+
+    Args:
+        spark: SparkSession
+        delta_table: DeltaTable instance
+        updates_df: DataFrame containing UPDATE events (already in SCD Type 2 format)
+    """
+    from pyspark.sql.functions import col, lit
+
+    # Step 1: Close old versions using MERGE
+    delta_table.alias("target").merge(
+        updates_df.alias("source"),
+        "target.id = source.id AND target.is_current = true"
+    ).whenMatchedUpdate(
+        set = {
+            "valid_to": col("source.valid_from"),
+            "is_current": lit(False)
+        }
+    ).execute()
+
+    logger.info(f"UPDATE: Closed old versions for {updates_df.count()} records")
+
+    # Step 2: Prepare new versions (drop operation column before writing)
+    new_versions = updates_df.drop("operation")
+
+    # Step 3: Append new versions
+    new_versions.write \
+        .format("delta") \
+        .mode("append") \
+        .save(DELTA_TABLE_PATH)
+
+    logger.info(f"UPDATE: Inserted new versions for {new_versions.count()} records")
+
+
+def process_deletes(delta_table, deletes_df):
+    """
+    Handle DELETE: Close current version
+
+    Args:
+        delta_table: DeltaTable instance
+        deletes_df: DataFrame containing DELETE events
+    """
+    from pyspark.sql.functions import col, lit
+
+    delta_table.alias("target").merge(
+        deletes_df.alias("source"),
+        "target.id = source.id AND target.is_current = true"
+    ).whenMatchedUpdate(
+        set = {
+            "valid_to": col("source.valid_from"),
+            "is_current": lit(False)
+        }
+    ).execute()
+
+    logger.info(f"DELETE: Closed {deletes_df.count()} records")
+
+
+def process_creates(spark, delta_table, creates_df):
+    """
+    Handle CREATE/READ: Insert new records if not already exist
+
+    Args:
+        spark: SparkSession
+        delta_table: DeltaTable instance
+        creates_df: DataFrame containing CREATE/READ events (already in SCD Type 2 format)
+    """
+    from pyspark.sql.functions import col
+
+    # Prepare new records (drop operation column before writing)
+    new_records = creates_df.drop("operation")
+
+    # Use MERGE to avoid duplicates
+    delta_table.alias("target").merge(
+        new_records.alias("source"),
+        "target.id = source.id AND target.is_current = true"
+    ).whenNotMatchedInsert(
+        values = {
+            "id": col("source.id"),
+            "name": col("source.name"),
+            "email": col("source.email"),
+            "created_at": col("source.created_at"),
+            "updated_at": col("source.updated_at"),
+            "valid_from": col("source.valid_from"),
+            "valid_to": col("source.valid_to"),
+            "is_current": col("source.is_current"),
+            "cdc_timestamp": col("source.cdc_timestamp"),
+            "kafka_timestamp": col("source.kafka_timestamp"),
+            "processed_at": col("source.processed_at")
+        }
+    ).execute()
+
+    logger.info(f"CREATE/READ: Inserted {creates_df.count()} new records")
+
+
+def handle_cdc_operations(spark, cdc_df):
+    """
+    Handle CREATE, UPDATE, DELETE, READ operations using MERGE
+
+    Args:
+        spark: SparkSession
+        cdc_df: DataFrame containing CDC events with operation field
+    """
+    from pyspark.sql.functions import col
+
+    # Prepare staging DataFrame with SCD Type 2 columns
+    staging_df = prepare_staging_data(cdc_df)
+
+    # Check if Delta table exists
+    if not DeltaTable.isDeltaTable(spark, DELTA_TABLE_PATH):
+        # First write - create table with initial data
+        initialize_delta_table(spark, staging_df)
+        return
+
+    # Load existing Delta table
+    delta_table = DeltaTable.forPath(spark, DELTA_TABLE_PATH)
+
+    # Separate operations
+    creates_reads = staging_df.filter(col("operation").isin(["c", "r"]))
+    updates = staging_df.filter(col("operation") == "u")
+    deletes = staging_df.filter(col("operation") == "d")
+
+    # Process each operation type
+    if updates.count() > 0:
+        logger.info(f"Processing {updates.count()} UPDATE operations")
+        process_updates(spark, delta_table, updates)
+
+    if deletes.count() > 0:
+        logger.info(f"Processing {deletes.count()} DELETE operations")
+        process_deletes(delta_table, deletes)
+
+    if creates_reads.count() > 0:
+        logger.info(f"Processing {creates_reads.count()} CREATE/READ operations")
+        process_creates(spark, delta_table, creates_reads)
 
 
 def parse_confluent_avro(binary_data, topic="cdc.public.customers"):
@@ -289,37 +522,63 @@ def parse_cdc_events(kafka_df):
 
 
 def process_batch(batch_df, batch_id):
-    """Process each micro-batch with logging"""
-    count = batch_df.count()
-    print(f"[BATCH {batch_id}] Processing {count} records", flush=True)
-    logger.info(f"=== Batch {batch_id}: Processing {count} records ===")
+    """
+    Process each micro-batch with SCD Type 2 logic
 
-    if count > 0:
-        # Show sample data
+    Handles all CDC operations:
+    - c (CREATE): Insert new record
+    - u (UPDATE): Close old version, insert new version
+    - d (DELETE): Close current version, mark as deleted
+    - r (READ): Initial snapshot - treat like CREATE
+    - t (TRUNCATE): Close all active records
+    """
+    from pyspark.sql.functions import col
+
+    count = batch_df.count()
+    logger.info(f"=== Batch {batch_id}: Processing {count} records ===")
+    print(f"[BATCH {batch_id}] Processing {count} records", flush=True)
+
+    if count == 0:
+        logger.info(f"=== Batch {batch_id}: No new data ===")
+        print(f"[BATCH {batch_id}] No new data", flush=True)
+        return
+
+    try:
+        # Get SparkSession from DataFrame
+        spark = batch_df.sparkSession
+
+        # Show sample data for debugging
+        logger.info(f"Batch {batch_id} sample data:")
         print(f"[BATCH {batch_id}] Sample data:", flush=True)
         batch_df.show(5, truncate=False)
 
-        # Debug: Check for NULL values
-        null_count = batch_df.filter(col("id").isNull()).count()
-        print(f"[BATCH {batch_id}] NULL id count: {null_count} out of {count}", flush=True)
+        # Debug: Show operation type distribution
+        ops_count = batch_df.groupBy("operation").count().collect()
+        for row in ops_count:
+            logger.info(f"Batch {batch_id}: Operation '{row['operation']}' = {row['count']} records")
+            print(f"[BATCH {batch_id}] Operation '{row['operation']}' = {row['count']} records", flush=True)
 
-        # Debug: Show first record details
-        first_record = batch_df.first()
-        if first_record:
-            print(f"[BATCH {batch_id}] First record: {first_record}", flush=True)
+        # Step 1: Handle TRUNCATE operations first (affects all records)
+        truncate_df = batch_df.filter(col("operation") == "t")
+        if truncate_df.count() > 0:
+            logger.info(f"Batch {batch_id}: Processing {truncate_df.count()} TRUNCATE operations")
+            print(f"[BATCH {batch_id}] Processing TRUNCATE operations", flush=True)
+            handle_truncate(spark, truncate_df)
 
-        # Write to Delta Lake
-        batch_df.write \
-            .format("delta") \
-            .mode("append") \
-            .option("mergeSchema", "true") \
-            .save(DELTA_TABLE_PATH)
+        # Step 2: Handle normal CDC operations (c, u, d, r)
+        normal_ops_df = batch_df.filter(col("operation").isin(["c", "u", "d", "r"]))
+        if normal_ops_df.count() > 0:
+            logger.info(f"Batch {batch_id}: Processing {normal_ops_df.count()} CDC operations")
+            print(f"[BATCH {batch_id}] Processing CDC operations", flush=True)
+            handle_cdc_operations(spark, normal_ops_df)
 
-        print(f"[BATCH {batch_id}] Successfully wrote {count} records to Delta Lake", flush=True)
-        logger.info(f"=== Batch {batch_id}: Successfully wrote {count} records to Delta Lake ===")
-    else:
-        print(f"[BATCH {batch_id}] No new data", flush=True)
-        logger.info(f"=== Batch {batch_id}: No new data ===")
+        logger.info(f"=== Batch {batch_id}: Successfully processed {count} records ===")
+        print(f"[BATCH {batch_id}] Successfully processed {count} records", flush=True)
+
+    except Exception as e:
+        logger.error(f"Batch {batch_id}: Error processing batch: {str(e)}", exc_info=True)
+        print(f"[BATCH {batch_id}] ERROR: {str(e)}", flush=True)
+        raise
 
 
 def write_to_delta_lake(streaming_df):
